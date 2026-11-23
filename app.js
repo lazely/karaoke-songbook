@@ -168,17 +168,91 @@ function fetchJson(url, ms = 8000) {
     .finally(() => clearTimeout(t));
 }
 
-/* 제목/가수로 노래방 DB 조회 → [{brand, no, title, singer}] */
+/* DB 조회 기록 캐시 — 초성 검색은 이 안에서만 가능 (API가 초성을 지원하지 않음) */
+const DB_CACHE_KEY = 'karaoke.dbCache.v1';
+let dbCache = new Map();
+
+try {
+  const raw = localStorage.getItem(DB_CACHE_KEY);
+  if (raw) {
+    for (const it of JSON.parse(raw)) if (it && it.title) dbCache.set(`${it.brand || ''}|${it.no || ''}`, it);
+  }
+} catch (err) {
+  dbCache = new Map();
+}
+
+function cacheDbItems(items) {
+  let changed = false;
+  for (const it of items) {
+    if (!it || !it.title) continue;
+    const key = `${it.brand || ''}|${it.no || ''}`;
+    const title = it._title || it.title;
+    const prev = dbCache.get(key);
+    if (prev && prev.title === title && prev.singer === (it.singer || '')) continue;
+    dbCache.set(key, { brand: it.brand || '', no: it.no || '', title, singer: it.singer || '' });
+    changed = true;
+  }
+  if (!changed) return;
+  if (dbCache.size > 1500) {
+    const kept = [...dbCache.values()].slice(-1500);
+    dbCache = new Map(kept.map((it) => [`${it.brand}|${it.no}`, it]));
+  }
+  try {
+    localStorage.setItem(DB_CACHE_KEY, JSON.stringify([...dbCache.values()]));
+  } catch (err) {
+    /* 저장 공간 부족 시 무시 */
+  }
+}
+
+/* 제목/가수로 노래방 DB 조회 → { items: [{brand,no,title,singer}], cacheOnly } */
 async function searchDb(q, limit = 6) {
   const term = q.trim();
-  if (!term) return [];
-  const enc = encodeURIComponent(term);
-  const [byTitle, bySinger] = await Promise.all([
-    fetchJson(`${DB_BASE}/song/${enc}.json`).catch(() => []),
-    fetchJson(`${DB_BASE}/singer/${enc}.json`).catch(() => []),
-  ]);
-  return rankDb([...(Array.isArray(byTitle) ? byTitle : []), ...(Array.isArray(bySinger) ? bySinger : [])], term, limit);
+  if (!term) return { items: [], cacheOnly: false };
+
+  // 초성(ㄱㄴㄷ…)은 API가 못 찾음 → 기록 캐시에서 매칭
+  if (JAMO_RE.test(term)) {
+    const items = [...dbCache.values()].filter((it) => choseong(it.title + (it.singer || '')).includes(term));
+    return { items: items.slice(0, limit), cacheOnly: true };
+  }
+
+  // API는 공백이 들어간 쿼리에 빈 결과를 준다 → 공백 제거본으로 조회, 실패 시 단어별 재조회
+  const compact = term.replace(/\s+/g, '');
+  const variants = [compact];
+  const parts = term.split(/\s+/).filter((p) => p.length > 1);
+  if (parts.length > 1) variants.push(...parts);
+
+  const lists = await Promise.all(
+    variants.map(async (v) => {
+      const enc = encodeURIComponent(v);
+      const [byTitle, bySinger] = await Promise.all([
+        fetchJson(`${DB_BASE}/song/${enc}.json`).catch(() => []),
+        fetchJson(`${DB_BASE}/singer/${enc}.json`).catch(() => []),
+      ]);
+      return [...(Array.isArray(byTitle) ? byTitle : []), ...(Array.isArray(bySinger) ? bySinger : [])];
+    })
+  );
+
+  const all = lists.flat();
+  restoreSpacing(all);
+  cacheDbItems(all);
+  return { items: rankDb(all, term, limit), cacheOnly: false };
 }
+
+/* TJ 쪽은 제목 공백을 지워서 내려준다 → 같은 곡의 다른 업체 레코드(공백 있음)를 찾아 복원 */
+function restoreSpacing(items) {
+  const spaced = new Map();
+  for (const it of items) {
+    if (!it || !it.title) continue;
+    const k = norm(it.title);
+    if (/\s/.test(it.title) && !spaced.has(k)) spaced.set(k, it.title);
+  }
+  for (const it of items) {
+    if (!it || !it.title) continue;
+    if (!/\s/.test(it.title) && spaced.has(norm(it.title))) it._title = spaced.get(norm(it.title));
+  }
+}
+
+const titleOfHit = (it) => it._title || it.title;
 
 function rankDb(items, q, limit = 80) {
   const nq = norm(q);
@@ -378,7 +452,7 @@ function dbHitRow(it, i) {
   return `<button type="button" class="dbrow" data-i="${i}">
     <span class="brand ${esc(it.brand || '')}">${esc(brand)}</span>
     <span class="row-main">
-      <span class="row-title">${esc(it.title)}</span>
+      <span class="row-title">${esc(titleOfHit(it))}</span>
       <span class="row-sub">${esc(it.singer || '')}</span>
     </span>
     <span class="dbno">${esc(it.no || '')}</span>
@@ -556,25 +630,33 @@ function openSongSheet(song, prefill) {
         }
         hitsTimer = setTimeout(async () => {
           paintHits('<div class="hitsmsg">노래방 번호 찾는 중…</div>');
-          let items = [];
+          let res = { items: [], cacheOnly: false };
           try {
-            items = await searchDb(v);
+            res = await searchDb(v);
           } catch (err) {
             if (my !== hitsSeq) return;
             paintHits('<div class="hitsmsg">DB 연결 실패 · 번호는 직접 입력해도 돼요</div>');
             return;
           }
           if (my !== hitsSeq) return;
+          const items = res.items;
           if (!items.length) {
-            paintHits('<div class="hitsmsg">DB에 없음 · 그대로 저장하고 번호는 나중에 넣어도 돼요</div>');
+            paintHits(
+              res.cacheOnly
+                ? '<div class="hitsmsg">초성은 이 기기에 쌓인 검색 기록에서만 찾아요 · 글자를 하나 더 넣어 보세요</div>'
+                : '<div class="hitsmsg">DB에 없음 · 그대로 저장하고 번호는 나중에 넣어도 돼요</div>'
+            );
             return;
           }
-          paintHits(items.map((it, i) => dbHitRow(it, i)).join(''));
+          const note = res.cacheOnly ? '<div class="hitsmsg">저장된 검색 기록에서 찾음</div>' : '';
+          paintHits(items.map((it, i) => dbHitRow(it, i)).join('') + note);
           $$('.dbrow', hits).forEach((el) => {
             el.addEventListener('click', () => {
               const it = items[Number(el.dataset.i)];
               if (!it) return;
-              titleInput.value = it.title;
+              const typed = titleInput.value.trim();
+              const dbTitle = titleOfHit(it);
+              titleInput.value = typed && norm(typed) === norm(dbTitle) ? typed : dbTitle;
               artistInput.value = it.singer || '';
               numberInput.value = `${BRANDS[it.brand] || ''} ${it.no}`.trim();
               paintHits(`<div class="hitsmsg ok">${esc(BRANDS[it.brand] || it.brand)} ${esc(it.no)} 채움 · 태그만 골라 저장</div>`);
