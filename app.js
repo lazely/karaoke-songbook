@@ -58,7 +58,7 @@ const SAMPLE = [
   { title: '사랑은 늘 도망가', artist: '임영웅', reading: 'sarang-eun neul domangga' },
 ];
 
-let state = { songs: [], tags: [], playlists: [], settings: { theme: 'auto' } };
+let state = { songs: [], tags: [], playlists: [], settings: { theme: 'dark' } };
 
 const ui = {
   view: 'songs',
@@ -82,7 +82,7 @@ function load() {
         songs: Array.isArray(d.songs) ? d.songs.map(cleanSong) : [],
         tags: Array.isArray(d.tags) ? d.tags : PRESET_TAGS.map((t) => ({ ...t })),
         playlists: Array.isArray(d.playlists) ? d.playlists : [],
-        settings: { theme: 'auto', ...(d.settings || {}) },
+        settings: { theme: 'dark', ...(d.settings || {}) },
       };
       return;
     }
