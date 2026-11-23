@@ -62,11 +62,7 @@ let state = { songs: [], tags: [], playlists: [], settings: { theme: 'dark' } };
 
 const ui = {
   view: 'songs',
-  mode: 'mine',
   q: '',
-  dbq: '',
-  db: { status: 'idle', items: [], error: '' },
-  dbKr: false,
   tags: new Set(),
   matchAll: true,
   sort: 'recent',
@@ -164,9 +160,6 @@ function visibleSongs() {
 
 /* ---------------- 노래방 DB 검색 ---------------- */
 
-let dbTimer = null;
-let dbSeq = 0;
-
 function fetchJson(url, ms = 8000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
@@ -175,39 +168,19 @@ function fetchJson(url, ms = 8000) {
     .finally(() => clearTimeout(t));
 }
 
-function scheduleDbSearch(q) {
-  ui.dbq = q;
-  clearTimeout(dbTimer);
-  if (!q.trim()) {
-    dbSeq++;
-    ui.db = { status: 'idle', items: [], error: '' };
-    renderDbList();
-    return;
-  }
-  ui.db = { status: 'loading', items: [], error: '' };
-  renderDbList();
-  dbTimer = setTimeout(() => runDbSearch(q), 320);
+/* 제목/가수로 노래방 DB 조회 → [{brand, no, title, singer}] */
+async function searchDb(q, limit = 6) {
+  const term = q.trim();
+  if (!term) return [];
+  const enc = encodeURIComponent(term);
+  const [byTitle, bySinger] = await Promise.all([
+    fetchJson(`${DB_BASE}/song/${enc}.json`).catch(() => []),
+    fetchJson(`${DB_BASE}/singer/${enc}.json`).catch(() => []),
+  ]);
+  return rankDb([...(Array.isArray(byTitle) ? byTitle : []), ...(Array.isArray(bySinger) ? bySinger : [])], term, limit);
 }
 
-async function runDbSearch(q) {
-  const seq = ++dbSeq;
-  const enc = encodeURIComponent(q.trim());
-  try {
-    const [byTitle, bySinger] = await Promise.all([
-      fetchJson(`${DB_BASE}/song/${enc}.json`).catch(() => []),
-      fetchJson(`${DB_BASE}/singer/${enc}.json`).catch(() => []),
-    ]);
-    if (seq !== dbSeq) return;
-    const items = rankDb([...(Array.isArray(byTitle) ? byTitle : []), ...(Array.isArray(bySinger) ? bySinger : [])], q);
-    ui.db = { status: items.length ? 'ok' : 'empty', items, error: '' };
-  } catch (err) {
-    if (seq !== dbSeq) return;
-    ui.db = { status: 'error', items: [], error: err && err.name === 'AbortError' ? '시간 초과' : '연결 실패' };
-  }
-  renderDbList();
-}
-
-function rankDb(items, q) {
+function rankDb(items, q, limit = 80) {
   const nq = norm(q);
   const seen = new Set();
   const out = [];
@@ -234,7 +207,7 @@ function rankDb(items, q) {
     return s;
   };
   out.sort((a, b) => score(b) - score(a));
-  return out.slice(0, 80);
+  return out.slice(0, limit);
 }
 
 /* ---------------- 공통 UI ---------------- */
@@ -328,50 +301,28 @@ function renderTop() {
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>';
 
 function renderSongsView() {
-  const isDb = ui.mode === 'db';
   app.innerHTML = `
     <div class="pad">
       <div class="searchbox">
         ${SEARCH_ICON}
         <input id="q" type="search" autocomplete="off" enterkeyhint="search"
-          placeholder="${isDb ? 'TJ·금영 DB에서 곡/가수 검색' : '제목 · 아티스트 · 읽기 · 초성'}"
-          value="${esc(isDb ? ui.dbq : ui.q)}">
-        <button class="clearbtn" data-act="clearQ" aria-label="지우기" ${(isDb ? ui.dbq : ui.q) ? '' : 'hidden'}>✕</button>
+          placeholder="제목 · 가수 · 읽기 · 초성" value="${esc(ui.q)}">
+        <button class="clearbtn" data-act="clearQ" aria-label="지우기" ${ui.q ? '' : 'hidden'}>✕</button>
       </div>
-      <div class="modebar">
-        <button data-act="mode" data-v="mine" class="${isDb ? '' : 'on'}">내 노래</button>
-        <button data-act="mode" data-v="db" class="${isDb ? 'on' : ''}">노래방 DB</button>
-      </div>
-      <div id="minePane" ${isDb ? 'hidden' : ''}>
-        <div class="filterrow" id="filterRow"></div>
-        <div class="listbar"><span id="count"></span><div class="seg" id="sortSeg"></div></div>
-        <div id="songList"></div>
-      </div>
-      <div id="dbPane" ${isDb ? '' : 'hidden'}>
-        <div class="listbar">
-          <span id="dbCount"></span>
-          <button class="chip ${ui.dbKr ? 'on' : ''}" data-act="dbKr" style="font-size:10.5px;padding:4px 8px">TJ·금영만</button>
-        </div>
-        <div id="dbList"></div>
-      </div>
+      <div class="filterrow" id="filterRow"></div>
+      <div class="listbar"><span id="count"></span><div class="seg" id="sortSeg"></div></div>
+      <div id="songList"></div>
     </div>`;
 
   const input = $('#q');
   input.addEventListener('input', () => {
-    const v = input.value;
-    $('.clearbtn').hidden = !v;
-    if (ui.mode === 'db') scheduleDbSearch(v);
-    else {
-      ui.q = v;
-      renderSongList();
-    }
+    ui.q = input.value;
+    $('.clearbtn').hidden = !ui.q;
+    renderSongList();
   });
 
-  if (isDb) renderDbList();
-  else {
-    renderFilterChips();
-    renderSongList();
-  }
+  renderFilterChips();
+  renderSongList();
 }
 
 function renderFilterChips() {
@@ -396,7 +347,7 @@ function renderSongList() {
   if (!list.length) {
     box.innerHTML = state.songs.length
       ? '<div class="empty"><strong>조건에 맞는 곡이 없어요</strong>검색어나 태그 필터를 지워 보세요</div>'
-      : '<div class="empty"><strong>아직 곡이 없어요</strong>＋ 로 직접 추가하거나<br>노래방 DB에서 찾아 담아 보세요</div>';
+      : '<div class="empty"><strong>아직 곡이 없어요</strong>＋ 로 곡을 추가하면<br>노래방 번호까지 자동으로 찾아줘요</div>';
     return;
   }
   box.innerHTML = list.map(songRow).join('');
@@ -417,62 +368,22 @@ function songRow(s) {
 
 /* ---------------- DB 결과 ---------------- */
 
-let dbShown = [];
-
 function haveKey(title, artist) {
   return state.songs.some((s) => norm(s.title) === norm(title) && norm(s.artist) === norm(artist));
 }
 
-function renderDbList() {
-  const box = $('#dbList');
-  if (!box) return;
-  const count = $('#dbCount');
-  const { status, items, error } = ui.db;
-
-  if (status === 'idle') {
-    count.textContent = '';
-    box.innerHTML = '<div class="dbstate">곡 제목이나 가수를 검색하면<br><b>노래방 곡번호</b>까지 같이 찾아줘요.<br><span class="small">데이터: TJ · 금영 · DAM · JOYSOUND</span></div>';
-    return;
-  }
-  if (status === 'loading') {
-    count.textContent = '검색 중';
-    box.innerHTML = '<div class="dbstate">찾는 중…</div>';
-    return;
-  }
-  if (status === 'error') {
-    count.textContent = '';
-    box.innerHTML = `<div class="dbstate"><b>${esc(error || '연결 실패')}</b><br>잠시 후 다시 시도해 주세요.<br><button class="btn small" data-act="dbRetry" style="margin-top:12px">다시 검색</button></div>`;
-    return;
-  }
-  if (status === 'empty') {
-    count.textContent = '0건';
-    box.innerHTML = `<div class="dbstate"><b>DB에 결과가 없어요</b>다른 표기로 검색하거나 직접 추가해 보세요.<br><button class="btn small" data-act="newSong" style="margin-top:12px">직접 추가</button></div>`;
-    return;
-  }
-
-  const shown = ui.dbKr ? items.filter((i) => i.brand === 'tj' || i.brand === 'kumyoung') : items;
-  if (!shown.length) {
-    count.textContent = '0건';
-    box.innerHTML = '<div class="dbstate"><b>TJ·금영에는 없어요</b>다른 업체(DAM·JOYSOUND)에는 있을 수 있어요.<br><button class="btn small" data-act="dbKr" style="margin-top:12px">전체 보기</button></div>';
-    return;
-  }
-  count.textContent = `${shown.length}건`;
-  dbShown = shown;
-  box.innerHTML = shown
-    .map((it, i) => {
-      const brand = BRANDS[it.brand] || it.brand || '?';
-      const have = haveKey(it.title, it.singer);
-      return `<button class="dbrow" data-act="dbAdd" data-i="${i}">
-        <span class="brand ${esc(it.brand || '')}">${esc(brand)}</span>
-        <span class="row-main">
-          <span class="row-title">${esc(it.title)}</span>
-          <span class="row-sub">${esc(it.singer || '')}</span>
-        </span>
-        <span class="dbno">${esc(it.no || '')}</span>
-        <span class="addmark ${have ? 'have' : ''}">${have ? '있음' : '＋'}</span>
-      </button>`;
-    })
-    .join('');
+function dbHitRow(it, i) {
+  const brand = BRANDS[it.brand] || it.brand || '?';
+  const have = haveKey(it.title, it.singer);
+  return `<button type="button" class="dbrow" data-i="${i}">
+    <span class="brand ${esc(it.brand || '')}">${esc(brand)}</span>
+    <span class="row-main">
+      <span class="row-title">${esc(it.title)}</span>
+      <span class="row-sub">${esc(it.singer || '')}</span>
+    </span>
+    <span class="dbno">${esc(it.no || '')}</span>
+    ${have ? '<span class="addmark have">있음</span>' : ''}
+  </button>`;
 }
 
 /* ---------------- 플리 ---------------- */
@@ -606,7 +517,8 @@ function openSongSheet(song, prefill) {
   openSheet({
     title: isNew ? '곡 추가' : '곡 수정',
     body: `<form class="form" id="songForm" novalidate>
-      <label class="field"><span>제목</span><input name="title" value="${esc(draft.title)}" autocomplete="off" placeholder="곡 제목"></label>
+      <label class="field"><span>제목</span><input name="title" value="${esc(draft.title)}" autocomplete="off" placeholder="곡 제목을 치면 노래방 번호를 찾아요"></label>
+      <div class="hits" id="dbHits" hidden></div>
       <label class="field"><span>가수</span><input name="artist" value="${esc(draft.artist)}" autocomplete="off" placeholder="아티스트"></label>
       <label class="field"><span>읽기 (가나 · 로마자)</span><input name="reading" value="${esc(draft.reading)}" autocomplete="off" placeholder="예: zankoku na tenshi / ざんこく"></label>
       <div class="field"><span>태그</span><div class="chips" id="tagChips">${tagChips()}</div>
@@ -620,6 +532,56 @@ function openSongSheet(song, prefill) {
     mount(root) {
       const form = $('#songForm', root);
       const chips = $('#tagChips', root);
+
+      /* 제목 입력 → 노래방 DB 조회 → 번호 자동 채움 */
+      const titleInput = form.querySelector('input[name="title"]');
+      const artistInput = form.querySelector('input[name="artist"]');
+      const numberInput = form.querySelector('input[name="number"]');
+      const hits = $('#dbHits', root);
+      let hitsSeq = 0;
+      let hitsTimer = null;
+
+      const paintHits = (html) => {
+        hits.innerHTML = html;
+        hits.hidden = !html;
+      };
+
+      titleInput.addEventListener('input', () => {
+        const v = titleInput.value.trim();
+        clearTimeout(hitsTimer);
+        const my = ++hitsSeq;
+        if (!v) {
+          paintHits('');
+          return;
+        }
+        hitsTimer = setTimeout(async () => {
+          paintHits('<div class="hitsmsg">노래방 번호 찾는 중…</div>');
+          let items = [];
+          try {
+            items = await searchDb(v);
+          } catch (err) {
+            if (my !== hitsSeq) return;
+            paintHits('<div class="hitsmsg">DB 연결 실패 · 번호는 직접 입력해도 돼요</div>');
+            return;
+          }
+          if (my !== hitsSeq) return;
+          if (!items.length) {
+            paintHits('<div class="hitsmsg">DB에 없음 · 그대로 저장하고 번호는 나중에 넣어도 돼요</div>');
+            return;
+          }
+          paintHits(items.map((it, i) => dbHitRow(it, i)).join(''));
+          $$('.dbrow', hits).forEach((el) => {
+            el.addEventListener('click', () => {
+              const it = items[Number(el.dataset.i)];
+              if (!it) return;
+              titleInput.value = it.title;
+              artistInput.value = it.singer || '';
+              numberInput.value = `${BRANDS[it.brand] || ''} ${it.no}`.trim();
+              paintHits(`<div class="hitsmsg ok">${esc(BRANDS[it.brand] || it.brand)} ${esc(it.no)} 채움 · 태그만 골라 저장</div>`);
+            });
+          });
+        }, 380);
+      });
 
       chips.addEventListener('click', (e) => {
         const c = e.target.closest('.chip');
@@ -952,37 +914,6 @@ document.addEventListener('click', (e) => {
       window.scrollTo({ top: 0 });
       break;
 
-    case 'mode': {
-      const next = el.dataset.v;
-      if (next === ui.mode) break;
-      ui.mode = next;
-      renderSongsView();
-      renderTop();
-      $('#q').focus();
-      break;
-    }
-
-    case 'dbAdd': {
-      const it = dbShown[Number(el.dataset.i)];
-      if (!it) break;
-      const brand = BRANDS[it.brand] || '';
-      openSongSheet(null, { title: it.title, artist: it.singer || '', number: `${brand} ${it.no}`.trim() });
-      break;
-    }
-
-    case 'dbRetry':
-      scheduleDbSearch(ui.dbq);
-      break;
-
-    case 'dbKr':
-      ui.dbKr = !ui.dbKr;
-      renderDbList();
-      {
-        const chip = $('[data-act="dbKr"]');
-        if (chip) chip.classList.toggle('on', ui.dbKr);
-      }
-      break;
-
     case 'newSong':
       openSongSheet(null);
       break;
@@ -1015,13 +946,7 @@ document.addEventListener('click', (e) => {
 
     case 'clearQ': {
       const input = $('#q');
-      if (ui.mode === 'db') {
-        ui.dbq = '';
-        scheduleDbSearch('');
-      } else {
-        ui.q = '';
-        renderSongList();
-      }
+      ui.q = '';
       if (input) {
         input.value = '';
         input.focus();
