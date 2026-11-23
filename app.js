@@ -1,7 +1,9 @@
 'use strict';
 
 /* ============================================================
-   노래방 수첩 — 단일 사용자용 로컬 저장 앱
+   노래방 수첩
+   - 내 목록: 검색(초성/가나/로마자) · 태그 필터 · 플리
+   - 노래방 DB: api.manana.kr (TJ/금영/DAM/JOYSOUND 곡번호 조회)
    ============================================================ */
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -12,7 +14,11 @@ const HUES = ['#0a84ff', '#34c759', '#ff9f0a', '#ff453a', '#bf5af2', '#5e5ce6', 
 const JAMO = 'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ';
 const JAMO_RE = /^[\u3131-\u314e]+$/;
 
-/* ---------------- 검색 정규화 ---------------- */
+const DB_BASE = 'https://api.manana.kr/karaoke';
+const BRANDS = { tj: 'TJ', kumyoung: '금영', dam: 'DAM', joysound: 'JOY' };
+const BRAND_RANK = { tj: 0, kumyoung: 1, dam: 2, joysound: 3 };
+
+/* ---------------- 정규화 ---------------- */
 
 const toHira = (s) => s.replace(/[\u30a1-\u30f6]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
 
@@ -32,7 +38,7 @@ function choseong(s) {
   return out;
 }
 
-/* ---------------- 시드 / 상태 ---------------- */
+/* ---------------- 상태 ---------------- */
 
 const STORE_KEY = 'karaoke.v1';
 
@@ -43,7 +49,6 @@ const PRESET_TAGS = [
   { id: 'tg-duet', label: '듀엣', hue: '#bf5af2' },
 ];
 
-/* 시작용 샘플(지우거나 그대로 써도 됨). 태그/메모는 비워 둠. */
 const SAMPLE = [
   { title: '残酷な天使のテーゼ', artist: '高橋洋子', reading: 'zankoku na tenshi no teeze / ざんこくなてんしのてーぜ' },
   { title: '夜に駆ける', artist: 'YOASOBI', reading: 'yoru ni kakeru / よるにかける' },
@@ -54,7 +59,19 @@ const SAMPLE = [
 ];
 
 let state = { songs: [], tags: [], playlists: [], settings: { theme: 'auto' } };
-const ui = { view: 'songs', q: '', tags: new Set(), matchAll: true, sort: 'recent', playlistId: null };
+
+const ui = {
+  view: 'songs',
+  mode: 'mine',
+  q: '',
+  dbq: '',
+  db: { status: 'idle', items: [], error: '' },
+  dbKr: false,
+  tags: new Set(),
+  matchAll: true,
+  sort: 'recent',
+  playlistId: null,
+};
 
 function load() {
   try {
@@ -115,7 +132,7 @@ function save() {
 const tagOf = (id) => state.tags.find((t) => t.id === id);
 const songOf = (id) => state.songs.find((s) => s.id === id);
 
-/* ---------------- 검색 ---------------- */
+/* ---------------- 내 목록 검색 ---------------- */
 
 function haystack(s) {
   const labels = s.tags.map((id) => tagOf(id)?.label || '');
@@ -143,6 +160,81 @@ function visibleSongs() {
   else if (ui.sort === 'artist') list.sort((a, b) => collator.compare(a.artist || '~', b.artist || '~') || collator.compare(a.title, b.title));
   else list.sort((a, b) => b.createdAt - a.createdAt);
   return list;
+}
+
+/* ---------------- 노래방 DB 검색 ---------------- */
+
+let dbTimer = null;
+let dbSeq = 0;
+
+function fetchJson(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal })
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+    .finally(() => clearTimeout(t));
+}
+
+function scheduleDbSearch(q) {
+  ui.dbq = q;
+  clearTimeout(dbTimer);
+  if (!q.trim()) {
+    dbSeq++;
+    ui.db = { status: 'idle', items: [], error: '' };
+    renderDbList();
+    return;
+  }
+  ui.db = { status: 'loading', items: [], error: '' };
+  renderDbList();
+  dbTimer = setTimeout(() => runDbSearch(q), 320);
+}
+
+async function runDbSearch(q) {
+  const seq = ++dbSeq;
+  const enc = encodeURIComponent(q.trim());
+  try {
+    const [byTitle, bySinger] = await Promise.all([
+      fetchJson(`${DB_BASE}/song/${enc}.json`).catch(() => []),
+      fetchJson(`${DB_BASE}/singer/${enc}.json`).catch(() => []),
+    ]);
+    if (seq !== dbSeq) return;
+    const items = rankDb([...(Array.isArray(byTitle) ? byTitle : []), ...(Array.isArray(bySinger) ? bySinger : [])], q);
+    ui.db = { status: items.length ? 'ok' : 'empty', items, error: '' };
+  } catch (err) {
+    if (seq !== dbSeq) return;
+    ui.db = { status: 'error', items: [], error: err && err.name === 'AbortError' ? '시간 초과' : '연결 실패' };
+  }
+  renderDbList();
+}
+
+function rankDb(items, q) {
+  const nq = norm(q);
+  const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    if (!it || !it.title) continue;
+    const key = `${it.brand}|${it.no}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(it);
+  }
+  const score = (it) => {
+    const nt = norm(it.title);
+    const ns = norm(it.singer);
+    let s = 0;
+    if (nt === nq) s += 100;
+    else if (nt.startsWith(nq)) s += 55;
+    else if (nt.includes(nq)) s += 25;
+    if (ns === nq) s += 40;
+    else if (ns.includes(nq)) s += 12;
+    if (/^[[(【]/.test(it.title.trim())) s -= 35;
+    if (/(カラオケ|歌ってみた|オルゴール|ピアノ|インスト|名演|サビカラ|ガイドメロディ|メドレー|ヒットソング|ベスト)/.test(it.title)) s -= 80;
+    s -= Math.min(nt.length, 40) * 0.3;
+    s -= (BRAND_RANK[it.brand] ?? 9) * 2;
+    return s;
+  };
+  out.sort((a, b) => score(b) - score(a));
+  return out.slice(0, 80);
 }
 
 /* ---------------- 공통 UI ---------------- */
@@ -221,7 +313,7 @@ function renderTop() {
     return render();
   }
   const isPl = ui.view === 'playlist';
-  const title = isPl ? pl.name : { songs: '곡', playlists: '플레이리스트', settings: '설정' }[ui.view];
+  const title = isPl ? pl.name : { songs: '노래방 수첩', playlists: '플레이리스트', settings: '설정' }[ui.view];
   const add = { songs: 'newSong', playlists: 'newPlaylist' }[ui.view];
   topbar.innerHTML = `
     <div class="topbar-inner">
@@ -231,30 +323,55 @@ function renderTop() {
     </div>`;
 }
 
-/* ---------------- 곡 목록 ---------------- */
+/* ---------------- 곡 화면 ---------------- */
 
-const SEARCH_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>';
+const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>';
 
 function renderSongsView() {
+  const isDb = ui.mode === 'db';
   app.innerHTML = `
     <div class="pad">
       <div class="searchbox">
         ${SEARCH_ICON}
-        <input id="q" type="search" placeholder="제목 · 아티스트 · 읽기 · 초성" autocomplete="off" enterkeyhint="search" value="${esc(ui.q)}">
-        <button class="clearbtn" data-act="clearQ" aria-label="지우기" ${ui.q ? '' : 'hidden'}>✕</button>
+        <input id="q" type="search" autocomplete="off" enterkeyhint="search"
+          placeholder="${isDb ? 'TJ·금영 DB에서 곡/가수 검색' : '제목 · 아티스트 · 읽기 · 초성'}"
+          value="${esc(isDb ? ui.dbq : ui.q)}">
+        <button class="clearbtn" data-act="clearQ" aria-label="지우기" ${(isDb ? ui.dbq : ui.q) ? '' : 'hidden'}>✕</button>
       </div>
-      <div class="filterrow" id="filterRow"></div>
-      <div class="listbar"><span id="count"></span><div class="seg" id="sortSeg"></div></div>
-      <div id="songList"></div>
+      <div class="modebar">
+        <button data-act="mode" data-v="mine" class="${isDb ? '' : 'on'}">내 노래</button>
+        <button data-act="mode" data-v="db" class="${isDb ? 'on' : ''}">노래방 DB</button>
+      </div>
+      <div id="minePane" ${isDb ? 'hidden' : ''}>
+        <div class="filterrow" id="filterRow"></div>
+        <div class="listbar"><span id="count"></span><div class="seg" id="sortSeg"></div></div>
+        <div id="songList"></div>
+      </div>
+      <div id="dbPane" ${isDb ? '' : 'hidden'}>
+        <div class="listbar">
+          <span id="dbCount"></span>
+          <button class="chip ${ui.dbKr ? 'on' : ''}" data-act="dbKr" style="font-size:10.5px;padding:4px 8px">TJ·금영만</button>
+        </div>
+        <div id="dbList"></div>
+      </div>
     </div>`;
+
   const input = $('#q');
   input.addEventListener('input', () => {
-    ui.q = input.value;
-    $('.clearbtn').hidden = !ui.q;
-    renderSongList();
+    const v = input.value;
+    $('.clearbtn').hidden = !v;
+    if (ui.mode === 'db') scheduleDbSearch(v);
+    else {
+      ui.q = v;
+      renderSongList();
+    }
   });
-  renderFilterChips();
-  renderSongList();
+
+  if (isDb) renderDbList();
+  else {
+    renderFilterChips();
+    renderSongList();
+  }
 }
 
 function renderFilterChips() {
@@ -263,7 +380,7 @@ function renderFilterChips() {
   const chips = state.tags
     .map((t) => `<button class="chip ${ui.tags.has(t.id) ? 'on' : ''}" data-act="toggleTag" data-tag="${t.id}" style="--hue:${t.hue}">${esc(t.label)}</button>`)
     .join('');
-  const mode = ui.tags.size > 1 ? `<button class="chip mode on" data-act="matchMode">${ui.matchAll ? '모두 포함' : '하나라도'}</button>` : '';
+  const mode = ui.tags.size > 1 ? `<button class="chip mode ${ui.matchAll ? 'on' : ''}" data-act="matchMode">${ui.matchAll ? '모두 포함' : '하나라도'}</button>` : '';
   row.innerHTML = chips + mode;
 }
 
@@ -272,14 +389,14 @@ function renderSongList() {
   if (!box) return;
   const list = visibleSongs();
   $('#count').textContent = state.songs.length ? (list.length === state.songs.length ? `${list.length}곡` : `${list.length} / ${state.songs.length}곡`) : '';
-  $('#sortSeg').innerHTML = [['recent', '최근'], ['title', '제목'], ['artist', '아티스트']]
+  $('#sortSeg').innerHTML = [['recent', '최근'], ['title', '제목'], ['artist', '가수']]
     .map(([v, l]) => `<button class="segbtn ${ui.sort === v ? 'on' : ''}" data-act="sort" data-v="${v}">${l}</button>`)
     .join('');
 
   if (!list.length) {
     box.innerHTML = state.songs.length
       ? '<div class="empty"><strong>조건에 맞는 곡이 없어요</strong>검색어나 태그 필터를 지워 보세요</div>'
-      : '<div class="empty"><strong>아직 곡이 없어요</strong>오른쪽 위 ＋ 로 첫 곡을 추가해 보세요</div>';
+      : '<div class="empty"><strong>아직 곡이 없어요</strong>＋ 로 직접 추가하거나<br>노래방 DB에서 찾아 담아 보세요</div>';
     return;
   }
   box.innerHTML = list.map(songRow).join('');
@@ -298,13 +415,73 @@ function songRow(s) {
   </button>`;
 }
 
+/* ---------------- DB 결과 ---------------- */
+
+let dbShown = [];
+
+function haveKey(title, artist) {
+  return state.songs.some((s) => norm(s.title) === norm(title) && norm(s.artist) === norm(artist));
+}
+
+function renderDbList() {
+  const box = $('#dbList');
+  if (!box) return;
+  const count = $('#dbCount');
+  const { status, items, error } = ui.db;
+
+  if (status === 'idle') {
+    count.textContent = '';
+    box.innerHTML = '<div class="dbstate">곡 제목이나 가수를 검색하면<br><b>노래방 곡번호</b>까지 같이 찾아줘요.<br><span class="small">데이터: TJ · 금영 · DAM · JOYSOUND</span></div>';
+    return;
+  }
+  if (status === 'loading') {
+    count.textContent = '검색 중';
+    box.innerHTML = '<div class="dbstate">찾는 중…</div>';
+    return;
+  }
+  if (status === 'error') {
+    count.textContent = '';
+    box.innerHTML = `<div class="dbstate"><b>${esc(error || '연결 실패')}</b><br>잠시 후 다시 시도해 주세요.<br><button class="btn small" data-act="dbRetry" style="margin-top:12px">다시 검색</button></div>`;
+    return;
+  }
+  if (status === 'empty') {
+    count.textContent = '0건';
+    box.innerHTML = `<div class="dbstate"><b>DB에 결과가 없어요</b>다른 표기로 검색하거나 직접 추가해 보세요.<br><button class="btn small" data-act="newSong" style="margin-top:12px">직접 추가</button></div>`;
+    return;
+  }
+
+  const shown = ui.dbKr ? items.filter((i) => i.brand === 'tj' || i.brand === 'kumyoung') : items;
+  if (!shown.length) {
+    count.textContent = '0건';
+    box.innerHTML = '<div class="dbstate"><b>TJ·금영에는 없어요</b>다른 업체(DAM·JOYSOUND)에는 있을 수 있어요.<br><button class="btn small" data-act="dbKr" style="margin-top:12px">전체 보기</button></div>';
+    return;
+  }
+  count.textContent = `${shown.length}건`;
+  dbShown = shown;
+  box.innerHTML = shown
+    .map((it, i) => {
+      const brand = BRANDS[it.brand] || it.brand || '?';
+      const have = haveKey(it.title, it.singer);
+      return `<button class="dbrow" data-act="dbAdd" data-i="${i}">
+        <span class="brand ${esc(it.brand || '')}">${esc(brand)}</span>
+        <span class="row-main">
+          <span class="row-title">${esc(it.title)}</span>
+          <span class="row-sub">${esc(it.singer || '')}</span>
+        </span>
+        <span class="dbno">${esc(it.no || '')}</span>
+        <span class="addmark ${have ? 'have' : ''}">${have ? '있음' : '＋'}</span>
+      </button>`;
+    })
+    .join('');
+}
+
 /* ---------------- 플리 ---------------- */
 
 function renderPlaylistsView() {
   app.innerHTML = `<div class="pad">${
     state.playlists.length
       ? state.playlists.map(plCard).join('')
-      : '<div class="empty"><strong>플레이리스트가 없어요</strong>오른쪽 위 ＋ 로 “1부 오프닝” 같은 목록을 만들어 보세요</div>'
+      : '<div class="empty"><strong>플레이리스트가 없어요</strong>＋ 로 “1부 오프닝” 같은 목록을 만들어 보세요</div>'
   }</div>`;
 }
 
@@ -398,17 +575,18 @@ function renderSettingsView() {
       </div>
       ${sampleCount ? `<div class="rowline"><span class="grow">샘플 곡 ${sampleCount}개</span><button class="btn small ghost danger-text" data-act="purgeSample">샘플 삭제</button></div>` : ''}
       <div class="rowline"><span class="grow danger-text">전체 삭제</span><button class="btn small ghost danger-text" data-act="wipe">지우기</button></div>
-      <p class="note">데이터는 이 기기 브라우저에만 저장돼요. 폰을 바꾸거나 브라우저 데이터를 지우면 사라지니, 가끔 <b>내보내기</b>로 백업해 두세요.</p>
+      <p class="note">데이터는 이 기기 브라우저에만 저장돼요. 폰을 바꾸거나 브라우저 데이터를 지우면 사라지니 가끔 <b>내보내기</b>로 백업해 두세요.</p>
     </section>
   </div>`;
 }
 
 /* ---------------- 곡 추가/수정 ---------------- */
 
-function openSongSheet(song) {
+function openSongSheet(song, prefill) {
   const isNew = !song;
+  const base = isNew ? prefill || {} : song;
   const draft = isNew
-    ? { title: '', artist: '', reading: '', memo: '', number: '', tags: [] }
+    ? { title: base.title || '', artist: base.artist || '', reading: '', memo: '', number: base.number || '', tags: [] }
     : { title: song.title, artist: song.artist, reading: song.reading, memo: song.memo, number: song.number, tags: [...song.tags] };
 
   const tagChips = () =>
@@ -429,7 +607,7 @@ function openSongSheet(song) {
     title: isNew ? '곡 추가' : '곡 수정',
     body: `<form class="form" id="songForm" novalidate>
       <label class="field"><span>제목</span><input name="title" value="${esc(draft.title)}" autocomplete="off" placeholder="곡 제목"></label>
-      <label class="field"><span>아티스트</span><input name="artist" value="${esc(draft.artist)}" autocomplete="off" placeholder="가수"></label>
+      <label class="field"><span>가수</span><input name="artist" value="${esc(draft.artist)}" autocomplete="off" placeholder="아티스트"></label>
       <label class="field"><span>읽기 (가나 · 로마자)</span><input name="reading" value="${esc(draft.reading)}" autocomplete="off" placeholder="예: zankoku na tenshi / ざんこく"></label>
       <div class="field"><span>태그</span><div class="chips" id="tagChips">${tagChips()}</div>
         <button type="button" class="linkbtn js-newtag">＋ 새 태그</button></div>
@@ -746,7 +924,9 @@ $('#importFile').addEventListener('change', async (e) => {
     if (!confirm(`현재 데이터를 덮어쓸까요?\n곡 ${d.songs.length}개로 복원합니다.`)) return;
     state.songs = d.songs.map(cleanSong);
     state.tags = Array.isArray(d.tags) && d.tags.length ? d.tags : PRESET_TAGS.map((t) => ({ ...t }));
-    state.playlists = Array.isArray(d.playlists) ? d.playlists.map((p) => ({ id: p.id || uid(), name: p.name || '플리', songIds: Array.isArray(p.songIds) ? p.songIds : [], createdAt: p.createdAt || Date.now() })) : [];
+    state.playlists = Array.isArray(d.playlists)
+      ? d.playlists.map((p) => ({ id: p.id || uid(), name: p.name || '플리', songIds: Array.isArray(p.songIds) ? p.songIds : [], createdAt: p.createdAt || Date.now() }))
+      : [];
     ui.tags.clear();
     save();
     render();
@@ -771,14 +951,48 @@ document.addEventListener('click', (e) => {
       render();
       window.scrollTo({ top: 0 });
       break;
+
+    case 'mode': {
+      const next = el.dataset.v;
+      if (next === ui.mode) break;
+      ui.mode = next;
+      renderSongsView();
+      renderTop();
+      $('#q').focus();
+      break;
+    }
+
+    case 'dbAdd': {
+      const it = dbShown[Number(el.dataset.i)];
+      if (!it) break;
+      const brand = BRANDS[it.brand] || '';
+      openSongSheet(null, { title: it.title, artist: it.singer || '', number: `${brand} ${it.no}`.trim() });
+      break;
+    }
+
+    case 'dbRetry':
+      scheduleDbSearch(ui.dbq);
+      break;
+
+    case 'dbKr':
+      ui.dbKr = !ui.dbKr;
+      renderDbList();
+      {
+        const chip = $('[data-act="dbKr"]');
+        if (chip) chip.classList.toggle('on', ui.dbKr);
+      }
+      break;
+
     case 'newSong':
       openSongSheet(null);
       break;
+
     case 'openSong': {
       const s = songOf(id);
       if (s) openSongSheet(s);
       break;
     }
+
     case 'toggleTag': {
       const t = el.dataset.tag;
       if (ui.tags.has(t)) ui.tags.delete(t);
@@ -787,46 +1001,60 @@ document.addEventListener('click', (e) => {
       renderSongList();
       break;
     }
+
     case 'matchMode':
       ui.matchAll = !ui.matchAll;
       renderFilterChips();
       renderSongList();
       break;
+
     case 'sort':
       ui.sort = el.dataset.v;
       renderSongList();
       break;
+
     case 'clearQ': {
-      ui.q = '';
       const input = $('#q');
+      if (ui.mode === 'db') {
+        ui.dbq = '';
+        scheduleDbSearch('');
+      } else {
+        ui.q = '';
+        renderSongList();
+      }
       if (input) {
         input.value = '';
         input.focus();
       }
       const cb = $('.clearbtn');
       if (cb) cb.hidden = true;
-      renderSongList();
       break;
     }
+
     case 'newPlaylist':
       openNewPlaylist();
       break;
+
     case 'openPl':
       ui.view = 'playlist';
       ui.playlistId = id;
       render();
       break;
+
     case 'backPl':
       ui.view = 'playlists';
       ui.playlistId = null;
       render();
       break;
+
     case 'addToPl':
       openPicker(ui.playlistId);
       break;
+
     case 'renamePl':
       renamePlaylist(ui.playlistId);
       break;
+
     case 'delPl': {
       const p = state.playlists.find((x) => x.id === ui.playlistId);
       if (!p) break;
@@ -838,12 +1066,15 @@ document.addEventListener('click', (e) => {
       render();
       break;
     }
+
     case 'moveUp':
       moveSongInPlaylist(id, -1);
       break;
+
     case 'moveDown':
       moveSongInPlaylist(id, 1);
       break;
+
     case 'rmFromPl': {
       const p = state.playlists.find((x) => x.id === ui.playlistId);
       if (!p) break;
@@ -852,17 +1083,21 @@ document.addEventListener('click', (e) => {
       render();
       break;
     }
+
     case 'theme':
       state.settings.theme = el.dataset.v;
       save();
       render();
       break;
+
     case 'export':
       exportJson();
       break;
+
     case 'import':
       $('#importFile').click();
       break;
+
     case 'purgeSample': {
       if (!confirm('샘플 곡을 모두 지울까요?')) break;
       const ids = new Set(state.songs.filter((s) => s.sample).map((s) => s.id));
@@ -873,6 +1108,7 @@ document.addEventListener('click', (e) => {
       toast('샘플을 지웠어요');
       break;
     }
+
     case 'wipe':
       if (!confirm('곡·플리·태그를 전부 지웁니다. 되돌릴 수 없어요.')) break;
       if (!confirm('정말 한 번 더 확인합니다. 지울까요?')) break;
@@ -883,12 +1119,15 @@ document.addEventListener('click', (e) => {
       save();
       render();
       break;
+
     case 'newTagSettings':
       newTagFromSettings();
       break;
+
     case 'editTag':
       editTag(el.dataset.tag);
       break;
+
     case 'delTag':
       deleteTag(el.dataset.tag);
       break;

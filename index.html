@@ -9,8 +9,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="노래수첩">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0b0b0e" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f3eee4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14120e" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -21,18 +21,9 @@
 <main id="app"></main>
 <nav class="tabbar" id="tabbar">
   <div class="tabbar-inner">
-    <button class="tab active" data-act="tab" data-tab="songs">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>
-      <span>곡</span>
-    </button>
-    <button class="tab" data-act="tab" data-tab="playlists">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 12h11M4 18h7"/><path d="M17 14.5l4 2.5-4 2.5z" fill="currentColor" stroke="none"/></svg>
-      <span>플리</span>
-    </button>
-    <button class="tab" data-act="tab" data-tab="settings">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M19 7h1M4 17h3M13 17h7"/><circle cx="16" cy="7" r="2.4"/><circle cx="10" cy="17" r="2.4"/></svg>
-      <span>설정</span>
-    </button>
+    <button class="tab active" data-act="tab" data-tab="songs"><span class="idx">01</span>곡</button>
+    <button class="tab" data-act="tab" data-tab="playlists"><span class="idx">02</span>플리</button>
+    <button class="tab" data-act="tab" data-tab="settings"><span class="idx">03</span>설정</button>
   </div>
 </nav>
 <input type="file" id="importFile" accept="application/json,.json" hidden>

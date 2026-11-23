@@ -1,4 +1,4 @@
-const CACHE = 'karaoke-v1';
+const CACHE = 'karaoke-v2';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
