@@ -1,5 +1,5 @@
-const CACHE = 'karaoke-v7';
-const ASSETS = ['./', './index.html', './styles.css?v=7', './app.js?v=7', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-192.png', './icon-512.png'];
+const CACHE = 'karaoke-v8';
+const ASSETS = ['./', './index.html', './styles.css?v=8', './app.js?v=8', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(

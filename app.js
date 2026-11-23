@@ -168,41 +168,87 @@ function fetchJson(url, ms = 8000) {
     .finally(() => clearTimeout(t));
 }
 
-/* DB 조회 기록 캐시 — 초성 검색은 이 안에서만 가능 (API가 초성을 지원하지 않음) */
-const DB_CACHE_KEY = 'karaoke.dbCache.v1';
-let dbCache = new Map();
+/* DB 조회 기록 캐시 — 초성 검색은 이 안에서만 가능 (API가 초성을 지원하지 않음)
+   저장 형태: [brand, no, title, singer] 배열 (압축) / 최대 20,000곡 */
+const DB_CACHE_KEY = 'karaoke.dbCache.v2';
+const DB_CACHE_MAX = 20000;
+let dbCache = new Map(); // key -> [brand, no, title, singer]
 
 try {
-  const raw = localStorage.getItem(DB_CACHE_KEY);
+  const raw = localStorage.getItem(DB_CACHE_KEY) || localStorage.getItem('karaoke.dbCache.v1');
   if (raw) {
-    for (const it of JSON.parse(raw)) if (it && it.title) dbCache.set(`${it.brand || ''}|${it.no || ''}`, it);
+    for (const row of JSON.parse(raw)) {
+      if (!row) continue;
+      const [brand, no, title, singer] = Array.isArray(row) ? row : [row.brand, row.no, row.title, row.singer];
+      if (!title) continue;
+      dbCache.set(`${brand || ''}|${no || ''}`, [brand || '', no || '', title, singer || '']);
+    }
   }
 } catch (err) {
   dbCache = new Map();
 }
 
+let dbSaveTimer = null;
+
+function saveDbCache() {
+  const attempt = (n) => {
+    const keep = [...dbCache.values()].slice(-n);
+    localStorage.setItem(DB_CACHE_KEY, JSON.stringify(keep));
+  };
+  for (const n of [DB_CACHE_MAX, 8000, 3000, 1000]) {
+    try {
+      attempt(n);
+      return;
+    } catch (err) {
+      /* 용량 부족 → 더 작게 재시도 */
+    }
+  }
+}
+
+function scheduleDbCacheSave() {
+  if (dbSaveTimer) return;
+  dbSaveTimer = setTimeout(() => {
+    dbSaveTimer = null;
+    saveDbCache();
+  }, 4000);
+}
+
+window.addEventListener('pagehide', () => {
+  if (dbSaveTimer) {
+    clearTimeout(dbSaveTimer);
+    dbSaveTimer = null;
+    saveDbCache();
+  }
+});
+
 function cacheDbItems(items) {
   let changed = false;
   for (const it of items) {
     if (!it || !it.title) continue;
-    const key = `${it.brand || ''}|${it.no || ''}`;
+    const brand = it.brand || '';
+    const no = it.no || '';
+    const key = `${brand}|${no}`;
     const title = it._title || it.title;
+    const singer = it.singer || '';
     const prev = dbCache.get(key);
-    if (prev && prev.title === title && prev.singer === (it.singer || '')) continue;
-    dbCache.set(key, { brand: it.brand || '', no: it.no || '', title, singer: it.singer || '' });
+    if (prev && prev[2] === title && prev[3] === singer) continue;
+    if (prev) dbCache.delete(key);
+    dbCache.set(key, [brand, no, title, singer]); // 최근 항목을 뒤로 (LRU)
     changed = true;
   }
   if (!changed) return;
-  if (dbCache.size > 1500) {
-    const kept = [...dbCache.values()].slice(-1500);
-    dbCache = new Map(kept.map((it) => [`${it.brand}|${it.no}`, it]));
+  if (dbCache.size > DB_CACHE_MAX) {
+    const drop = dbCache.size - DB_CACHE_MAX;
+    let i = 0;
+    for (const k of dbCache.keys()) {
+      if (i++ >= drop) break;
+      dbCache.delete(k);
+    }
   }
-  try {
-    localStorage.setItem(DB_CACHE_KEY, JSON.stringify([...dbCache.values()]));
-  } catch (err) {
-    /* 저장 공간 부족 시 무시 */
-  }
+  scheduleDbCacheSave();
 }
+
+const cacheHit = ([brand, no, title, singer]) => ({ brand, no, title, singer });
 
 /* 제목/가수로 노래방 DB 조회 → { items: [{brand,no,title,singer}], cacheOnly } */
 async function searchDb(q, limit = 6) {
@@ -211,7 +257,9 @@ async function searchDb(q, limit = 6) {
 
   // 초성(ㄱㄴㄷ…)은 API가 못 찾음 → 기록 캐시에서 매칭
   if (JAMO_RE.test(term)) {
-    const items = [...dbCache.values()].filter((it) => choseong(it.title + (it.singer || '')).includes(term));
+    const items = [...dbCache.values()]
+      .filter((row) => choseong(row[2] + row[3]).includes(term))
+      .map(cacheHit);
     return { items: items.slice(0, limit), cacheOnly: true };
   }
 
